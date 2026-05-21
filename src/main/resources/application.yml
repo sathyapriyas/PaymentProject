@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: wex-purchase-service
+  datasource:
+    url: jdbc:h2:mem:purchases;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: false
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+
+treasury:
+  api:
+    base-url: https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/rates_of_exchange
+
+server:
+  port: 8080
