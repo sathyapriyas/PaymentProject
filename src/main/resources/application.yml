@@ -21,3 +21,9 @@ treasury:
 
 server:
   port: 8080
+
+logging:
+  config: classpath:log4j2-spring.xml
+  level:
+    com.wex.purchase: info
+    org.springframework.web: warn

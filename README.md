@@ -22,6 +22,7 @@ Java/Spring Boot application that stores USD purchase transactions and retrieves
 - Spring Boot 3.4
 - Spring Data JPA + H2
 - RestClient for Treasury API
+- Log4j2 for application logging
 
 ## Prerequisites
 
@@ -36,6 +37,8 @@ mvn spring-boot:run
 ```
 
 Application listens on **http://localhost:8080**.
+
+Logging uses **Log4j2** (`log4j2-spring.xml`). Set `com.wex.purchase` to `debug` in `application.yml` for verbose Treasury and conversion traces.
 
 ## API examples
 

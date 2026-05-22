@@ -7,6 +7,8 @@ import com.wex.purchase.entity.PurchaseTransaction;
 import com.wex.purchase.exception.PurchaseNotFoundException;
 import com.wex.purchase.repository.PurchaseTransactionRepository;
 import com.wex.purchase.util.MoneyUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +16,8 @@ import java.util.UUID;
 
 @Service
 public class PurchaseService {
+
+    private static final Logger log = LogManager.getLogger(PurchaseService.class);
 
     private final PurchaseTransactionRepository repository;
     private final CurrencyConversionService currencyConversionService;
@@ -35,11 +39,14 @@ public class PurchaseService {
                 MoneyUtils.toCents(request.purchaseAmountUsd()));
 
         PurchaseTransaction saved = repository.save(transaction);
+        log.info("Persisted purchase: id={}, amountUsd={}, transactionDate={}",
+                saved.getId(), saved.getAmountUsd(), saved.getTransactionDate());
         return toStoredResponse(saved);
     }
 
     @Transactional(readOnly = true)
     public ConvertedPurchaseResponse retrieveConverted(UUID id, String targetCurrency) {
+        log.debug("Loading purchase for conversion: id={}, targetCurrency={}", id, targetCurrency);
         PurchaseTransaction transaction = repository.findById(id)
                 .orElseThrow(() -> new PurchaseNotFoundException("Purchase transaction not found: " + id));
 
@@ -47,6 +54,9 @@ public class PurchaseService {
                 transaction.getAmountUsd(),
                 transaction.getTransactionDate(),
                 targetCurrency);
+
+        log.info("Converted purchase: id={}, currency={}, rate={}, convertedAmount={}",
+                id, conversion.targetCurrency(), conversion.exchangeRate(), conversion.convertedAmount());
 
         return new ConvertedPurchaseResponse(
                 transaction.getId(),
