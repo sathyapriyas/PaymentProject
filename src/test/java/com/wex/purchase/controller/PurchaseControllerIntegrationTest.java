@@ -2,6 +2,7 @@ package com.wex.purchase.controller;
 
 import com.wex.purchase.client.TreasuryExchangeRateClient;
 import com.wex.purchase.dto.TreasuryRatesResponse;
+import com.wex.purchase.exception.TreasuryApiUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -116,5 +117,128 @@ class PurchaseControllerIntegrationTest {
         mockMvc.perform(get("/api/purchases/{id}", UUID.randomUUID())
                         .param("currency", "Canada-Dollar"))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void returns503WhenTreasuryApiUnavailable() throws Exception {
+        when(treasuryClient.findRates(any(), any(), any()))
+                .thenThrow(new TreasuryApiUnavailableException(
+                        "Treasury API is unavailable after multiple retry attempts",
+                        new RuntimeException("timeout")));
+
+        String id = storePurchase("Supplies", "2024-06-15", "25.00");
+
+        mockMvc.perform(get("/api/purchases/{id}", UUID.fromString(id))
+                        .param("currency", "Canada-Dollar"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.title").value("Treasury API Unavailable"));
+    }
+
+    @Test
+    void rejectsMissingCurrencyParam() throws Exception {
+        String id = storePurchase("Item", "2024-06-15", "10.00");
+
+        mockMvc.perform(get("/api/purchases/{id}", UUID.fromString(id)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsBlankCurrencyParam() throws Exception {
+        String id = storePurchase("Item", "2024-06-15", "10.00");
+
+        mockMvc.perform(get("/api/purchases/{id}", UUID.fromString(id))
+                        .param("currency", "   "))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsInvalidPurchaseIdFormat() throws Exception {
+        mockMvc.perform(get("/api/purchases/{id}", "not-a-valid-uuid")
+                        .param("currency", "Canada-Dollar"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void acceptsDescriptionAtMaxLength50() throws Exception {
+        String description = "x".repeat(50);
+        mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "description": "%s",
+                                  "transactionDate": "2024-06-15",
+                                  "purchaseAmountUsd": 10.00
+                                }
+                                """.formatted(description)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.description").value(description));
+    }
+
+    @Test
+    void rejectsBlankDescription() throws Exception {
+        mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "description": "   ",
+                                  "transactionDate": "2024-06-15",
+                                  "purchaseAmountUsd": 10.00
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void rejectsMissingRequiredFields() throws Exception {
+        mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void acceptsMinimumPurchaseAmount() throws Exception {
+        mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "description": "Min",
+                                  "transactionDate": "2024-06-15",
+                                  "purchaseAmountUsd": 0.01
+                                }
+                                """))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.purchaseAmountUsd").value(0.01));
+    }
+
+    @Test
+    void rejectsNegativePurchaseAmount() throws Exception {
+        mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "description": "Bad",
+                                  "transactionDate": "2024-06-15",
+                                  "purchaseAmountUsd": -5.00
+                                }
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    private String storePurchase(String description, String date, String amount) throws Exception {
+        return mockMvc.perform(post("/api/purchases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "description": "%s",
+                                  "transactionDate": "%s",
+                                  "purchaseAmountUsd": %s
+                                }
+                                """.formatted(description, date, amount)))
+                .andExpect(status().isCreated())
+                .andReturn()
+                .getResponse()
+                .getContentAsString()
+                .replaceAll(".*\"identifier\"\\s*:\\s*\"([^\"]+)\".*", "$1");
     }
 }
