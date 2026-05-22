@@ -1,7 +1,7 @@
 # Wex Purchase Service — Test Results
 
 **Report generated:** 2026-05-22  
-**Environment:** macOS · OpenJDK 21.0.11 (Homebrew) · Maven · Spring Boot 3.4.5  
+**Environment:** macOS · OpenJDK 21.0.11 (Homebrew) · Maven 3.x · Spring Boot 3.4.5  
 **Project:** `purchase-service` 1.0.0-SNAPSHOT
 
 ---
@@ -10,96 +10,266 @@
 
 | Test suite | Tests | Passed | Failed | Skipped | Result |
 |------------|-------|--------|--------|---------|--------|
-| Automated (`mvn test`) | 11 | 11 | 0 | 0 | **PASS** |
-| Manual API (live app on `:8080`) | 7 | 7 | 0 | 0 | **PASS** |
+| Automated (`mvn test`) | 13 | 13 | 0 | 0 | **PASS** |
+| Manual API (`localhost:8080`) | 8 | 8 | 0 | 0 | **PASS** |
 
 **Overall status: PASS**
 
+**Features under test:** Core purchase APIs, validation, 6-month conversion rule, Log4j2 logging, Spring Retry (Treasury HTTP), Caffeine `LoadingCache` (1h expire / 15m refresh / 5000 max).
+
 ---
 
-## 1. Automated Tests (Maven / JUnit 5)
+## 1. Automated Tests
 
-### 1.1 Command
+### 1.1 Execution Command (Input)
 
 ```bash
 export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 export PATH="$JAVA_HOME/bin:$PATH"
+cd "/Users/coolmom/Library/Mobile Documents/com~apple~CloudDocs/Sathya copy/My projects/Wex project"
 mvn test
 ```
 
-### 1.2 Build Result
+### 1.2 Build Result (Output)
 
 ```
-Tests run: 11, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 13, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
-Total time: 4.337 s
-Finished at: 2026-05-22T10:54:28-04:00
+Total time:  6.244 s
+Finished at: 2026-05-22T13:29:23-04:00
 ```
 
-### 1.3 Test Cases by Class
+---
 
-#### `MoneyUtilsTest` (2 tests)
+### 1.3 `MoneyUtilsTest` (2 tests)
 
-| Test | Status | Time |
-|------|--------|------|
-| `roundsToNearestCentHalfUp` | PASS | 0.001 s |
-| `keepsTwoDecimalPlaces` | PASS | 0.012 s |
+#### TEST-UT-01: `roundsToNearestCentHalfUp`
 
-**Validates:** USD amounts rounded to nearest cent using `HALF_UP`.
+| | Value |
+|---|--------|
+| **Input** | `MoneyUtils.toCents(10.125)` and `MoneyUtils.toCents(10.124)` |
+| **Expected** | `10.13` and `10.12` |
+| **Actual** | `10.13` and `10.12` |
+| **Result** | **PASS** (0.034 s total for class) |
+
+#### TEST-UT-02: `keepsTwoDecimalPlaces`
+
+| | Value |
+|---|--------|
+| **Input** | `MoneyUtils.toCents(99.99)` |
+| **Expected** | `99.99` |
+| **Actual** | `99.99` |
+| **Result** | **PASS** |
 
 ---
 
-#### `CurrencyConversionServiceTest` (3 tests)
+### 1.4 `CurrencyConversionServiceTest` (3 tests)
 
-| Test | Status | Time |
-|------|--------|------|
-| `convertsUsingMostRecentRateOnOrBeforePurchaseDate` | PASS | 0.001 s |
-| `throwsWhenNoRateWithinSixMonthWindow` | PASS | 0.019 s |
-| `ignoresRatesOlderThanSixMonths` | PASS | 0.001 s |
+#### TEST-UT-03: `convertsUsingMostRecentRateOnOrBeforePurchaseDate`
 
-**Validates:** 6-month lookback rule; selects rate `1.355` on `2024-03-31` for purchase `2024-06-15`; converted amount `135.50` for $100 USD.
+| | Value |
+|---|--------|
+| **Input** | `amountUsd=100.00`, `transactionDate=2024-06-15`, `currency=Canada-Dollar` |
+| **Mock Treasury rates** | `1.355` @ `2024-03-31`, `1.326` @ `2023-12-31` |
+| **Expected** | `exchangeRate=1.355`, `convertedAmount=135.50` |
+| **Actual** | Matches expected |
+| **Result** | **PASS** |
 
----
+#### TEST-UT-04: `throwsWhenNoRateWithinSixMonthWindow`
 
-#### `PurchaseServiceTest` (2 tests)
+| | Value |
+|---|--------|
+| **Input** | `amountUsd=50.00`, `transactionDate=2024-06-15`, `currency=Japan-Yen` |
+| **Mock Treasury rates** | Empty list `[]` |
+| **Expected** | `CurrencyConversionException` |
+| **Actual** | Exception thrown |
+| **Result** | **PASS** |
 
-| Test | Status | Time |
-|------|--------|------|
-| `storePersistsRoundedAmount` | PASS | 0.005 s |
-| `retrieveDelegatesToConversionService` | PASS | 0.092 s |
+#### TEST-UT-05: `ignoresRatesOlderThanSixMonths`
 
-**Validates:** Input `4.995` stored as `5.00`; retrieve orchestration with conversion service.
-
----
-
-#### `PurchaseControllerIntegrationTest` (4 tests)
-
-| Test | Status | Time | Notes |
-|------|--------|------|-------|
-| `storeAndRetrievePurchaseWithConversion` | PASS | 0.011 s | End-to-end HTTP; Treasury **mocked** |
-| `rejectsInvalidDescriptionLength` | PASS | 0.044 s | Description > 50 chars → **400** |
-| `returns422WhenConversionUnavailable` | PASS | 0.054 s | Mocked empty Treasury response → **422** |
-| `returns404ForUnknownPurchase` | PASS | 0.114 s | Unknown UUID → **404** |
-
-**Profile:** `test` (H2 test DB; Treasury client mocked)
+| | Value |
+|---|--------|
+| **Input** | `amountUsd=10.00`, `transactionDate=2024-06-15`, `currency=Mexico-Peso` |
+| **Mock Treasury rates** | `20.0` @ `2023-06-01` (outside 6-month window) |
+| **Expected** | `CurrencyConversionException` |
+| **Actual** | Exception thrown |
+| **Result** | **PASS** |
 
 ---
 
-## 2. Manual API Tests (Running Application)
+### 1.5 `PurchaseServiceTest` (2 tests)
+
+#### TEST-UT-06: `storePersistsRoundedAmount`
+
+| | Value |
+|---|--------|
+| **Input** | `CreatePurchaseRequest("Coffee", 2024-01-10, 4.995)` |
+| **Expected** | Stored and returned `purchaseAmountUsd=5.00` |
+| **Actual** | `5.00` in entity and response |
+| **Result** | **PASS** |
+
+#### TEST-UT-07: `retrieveDelegatesToConversionService`
+
+| | Value |
+|---|--------|
+| **Input** | `id=11111111-1111-1111-1111-111111111111`, `currency=Canada-Dollar` |
+| **Mock conversion** | `rate=1.355`, `convertedAmount=135.50` |
+| **Expected** | Response `convertedAmount=135.50` |
+| **Actual** | Matches |
+| **Result** | **PASS** |
+
+---
+
+### 1.6 `PurchaseControllerIntegrationTest` (4 tests)
+
+*Profile: `test` · Treasury client mocked · Log4j2 active*
+
+#### TEST-IT-01: `storeAndRetrievePurchaseWithConversion`
+
+**Step 1 — Store**
+
+| | Value |
+|---|--------|
+| **Input** | `POST /api/purchases` |
+
+```json
+{
+  "description": "Office supplies",
+  "transactionDate": "2024-06-15",
+  "purchaseAmountUsd": 100.00
+}
+```
+
+| | Value |
+|---|--------|
+| **Expected** | HTTP `201`, `purchaseAmountUsd=100.00` |
+| **Actual** | `201 Created` |
+| **Result** | **PASS** |
+
+**Step 2 — Retrieve**
+
+| | Value |
+|---|--------|
+| **Input** | `GET /api/purchases/{id}?currency=Canada-Dollar` |
+| **Mock rate** | `1.355` @ `2024-03-31` |
+| **Expected** | HTTP `200`, `exchangeRate=1.355`, `convertedAmount=135.50` |
+| **Actual** | All JSON paths match |
+| **Result** | **PASS** |
+
+---
+
+#### TEST-IT-02: `rejectsInvalidDescriptionLength`
+
+| | Value |
+|---|--------|
+| **Input** | `POST /api/purchases` with `description` = 51 × `"x"` |
+
+```json
+{
+  "description": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "transactionDate": "2024-06-15",
+  "purchaseAmountUsd": 10.00
+}
+```
+
+| | Value |
+|---|--------|
+| **Expected** | HTTP `400` |
+| **Actual** | `400 Bad Request` |
+| **Result** | **PASS** |
+
+---
+
+#### TEST-IT-03: `returns422WhenConversionUnavailable`
+
+**Step 1 — Store**
+
+| | Value |
+|---|--------|
+| **Input** | `POST /api/purchases` |
+
+```json
+{
+  "description": "Travel",
+  "transactionDate": "2024-06-15",
+  "purchaseAmountUsd": 50.00
+}
+```
+
+| | Value |
+|---|--------|
+| **Expected** | HTTP `201` |
+| **Actual** | `201 Created` |
+| **Result** | **PASS** |
+
+**Step 2 — Retrieve with empty mock rates**
+
+| | Value |
+|---|--------|
+| **Input** | `GET /api/purchases/{id}?currency=Japan-Yen` |
+| **Mock rates** | `[]` |
+| **Expected** | HTTP `422`, detail contains `"cannot be converted"` |
+| **Actual** | `422 Unprocessable Entity` |
+| **Result** | **PASS** |
+
+---
+
+#### TEST-IT-04: `returns404ForUnknownPurchase`
+
+| | Value |
+|---|--------|
+| **Input** | `GET /api/purchases/{random-uuid}?currency=Canada-Dollar` |
+| **Expected** | HTTP `404` |
+| **Actual** | `404 Not Found` |
+| **Result** | **PASS** |
+
+---
+
+### 1.7 `TreasuryExchangeRateClientCacheTest` (2 tests)
+
+*Validates Caffeine `LoadingCache` policy (mocked `TreasuryHttpClient`)*
+
+#### TEST-CACHE-01: `cachesTreasuryRatesForSameLookupKey`
+
+| | Value |
+|---|--------|
+| **Input** | Two calls: `findRates("Canada-Dollar", 2024-06-15, 2023-12-15)` |
+| **Mock** | `httpClient.fetchRates` returns one rate record |
+| **Expected** | `httpClient.fetchRates` invoked **exactly 1 time** |
+| **Actual** | 1 invocation (second call served from cache) |
+| **Log observed** | `Cache loader fetching Treasury rates: key=Canada-Dollar\|2024-06-15\|2023-12-15` (once per test method setup) |
+| **Result** | **PASS** |
+
+#### TEST-CACHE-02: `doesNotUseCacheForDifferentCurrency`
+
+| | Value |
+|---|--------|
+| **Input** | `findRates("Canada-Dollar", ...)` then `findRates("Japan-Yen", ...)` |
+| **Expected** | One HTTP fetch per distinct currency key |
+| **Actual** | `fetchRates(Canada-Dollar)` ×1, `fetchRates(Japan-Yen)` ×1 |
+| **Result** | **PASS** |
+
+---
+
+## 2. Manual API Tests (Live Application)
 
 ### 2.1 Preconditions
 
-- Application reachable at `http://localhost:8080` (instance already running on test host)
-- Live calls to [U.S. Treasury Fiscal Data API](https://fiscaldata.treasury.gov/api-documentation/) for currency conversion
+| Item | Value |
+|------|--------|
+| **Base URL** | `http://localhost:8080` |
+| **App state** | Running on port 8080 |
+| **Treasury API** | Live ([Fiscal Data API](https://fiscaldata.treasury.gov/api-documentation/)) |
+| **Cache policy** | max 5000 · expire 1h · refresh 15m |
 
-### 2.2 Test Cases
+---
 
-#### TC-API-01: Store purchase (Requirement #1)
+### 2.2 TC-API-01: Store purchase
 
-**Request:**
+**Input:**
 
 ```http
-POST /api/purchases
+POST http://localhost:8080/api/purchases
 Content-Type: application/json
 
 {
@@ -109,34 +279,42 @@ Content-Type: application/json
 }
 ```
 
-**Response:** `201 Created`
+**Output:**
+
+```http
+HTTP/1.1 201 Created
+```
 
 ```json
 {
-  "identifier": "b7c5d6b4-ae63-43c7-b90f-6ed097b1a7bd",
+  "identifier": "5cd396fb-0148-43ed-8f2c-1a999d043bcc",
   "description": "Office supplies",
   "transactionDate": "2024-06-15",
   "purchaseAmountUsd": 100.00
 }
 ```
 
-**Result:** PASS — UUID assigned; fields persisted as expected.
+| **Result** | **PASS** |
 
 ---
 
-#### TC-API-02: Retrieve with Canada-Dollar conversion (Requirement #2)
+### 2.3 TC-API-02: Retrieve with conversion (first call — cache load)
 
-**Request:**
+**Input:**
 
 ```http
-GET /api/purchases/b7c5d6b4-ae63-43c7-b90f-6ed097b1a7bd?currency=Canada-Dollar
+GET http://localhost:8080/api/purchases/5cd396fb-0148-43ed-8f2c-1a999d043bcc?currency=Canada-Dollar
 ```
 
-**Response:** `200 OK`
+**Output:**
+
+```http
+HTTP/1.1 200 OK
+```
 
 ```json
 {
-  "identifier": "b7c5d6b4-ae63-43c7-b90f-6ed097b1a7bd",
+  "identifier": "5cd396fb-0148-43ed-8f2c-1a999d043bcc",
   "description": "Office supplies",
   "transactionDate": "2024-06-15",
   "originalAmountUsd": 100.00,
@@ -146,151 +324,247 @@ GET /api/purchases/b7c5d6b4-ae63-43c7-b90f-6ed097b1a7bd?currency=Canada-Dollar
 }
 ```
 
-**Result:** PASS — Treasury rate applied; $100 × 1.355 = $135.50 (rounded to cent).
+| **Result** | **PASS** — $100 × 1.355 = $135.50 |
 
 ---
 
-#### TC-API-03: Unknown purchase ID
+### 2.4 TC-API-02b: Same retrieve (second call — cache hit)
 
-**Request:**
+**Input:**
 
 ```http
-GET /api/purchases/00000000-0000-0000-0000-000000000099?currency=Canada-Dollar
+GET http://localhost:8080/api/purchases/5cd396fb-0148-43ed-8f2c-1a999d043bcc?currency=Canada-Dollar
 ```
 
-**Response:** `404 Not Found`
+**Output:**
+
+```http
+HTTP/1.1 200 OK
+```
+
+```json
+{
+  "identifier": "5cd396fb-0148-43ed-8f2c-1a999d043bcc",
+  "description": "Office supplies",
+  "transactionDate": "2024-06-15",
+  "originalAmountUsd": 100.00,
+  "exchangeRate": 1.355,
+  "targetCurrency": "Canada-Dollar",
+  "convertedAmount": 135.50
+}
+```
+
+| **Result** | **PASS** — identical response; served from `LoadingCache` without new Treasury HTTP call |
+
+---
+
+### 2.5 TC-API-03: Unknown purchase ID
+
+**Input:**
+
+```http
+GET http://localhost:8080/api/purchases/00000000-0000-0000-0000-000000000099?currency=Canada-Dollar
+```
+
+**Output:**
+
+```http
+HTTP/1.1 404 Not Found
+```
 
 ```json
 {
   "type": "about:blank#purchase-not-found",
   "title": "Purchase Not Found",
   "status": 404,
-  "detail": "Purchase transaction not found: 00000000-0000-0000-0000-000000000099"
+  "detail": "Purchase transaction not found: 00000000-0000-0000-0000-000000000099",
+  "instance": "/api/purchases/00000000-0000-0000-0000-000000000099"
 }
 ```
 
-**Result:** PASS
+| **Result** | **PASS** |
 
 ---
 
-#### TC-API-04: Invalid description length (> 50 characters)
+### 2.6 TC-API-04: Invalid description length
 
-**Request:** `POST /api/purchases` with 51-character description
+**Input:**
 
-**Response:** `400 Bad Request`
+```http
+POST http://localhost:8080/api/purchases
+Content-Type: application/json
+
+{
+  "description": "<51 characters>",
+  "transactionDate": "2024-06-15",
+  "purchaseAmountUsd": 10.00
+}
+```
+
+**Output:**
+
+```http
+HTTP/1.1 400 Bad Request
+```
 
 ```json
 {
   "type": "about:blank#validation-error",
   "title": "Validation Error",
   "status": 400,
-  "detail": "description: size must be between 0 and 50"
+  "detail": "description: size must be between 0 and 50",
+  "instance": "/api/purchases"
 }
 ```
 
-**Result:** PASS
+| **Result** | **PASS** |
 
 ---
 
-#### TC-API-05: Cent rounding on store
+### 2.7 TC-API-05: Cent rounding on store
 
-**Request:**
+**Input:**
 
 ```http
-POST /api/purchases
-{ "description": "Coffee", "transactionDate": "2024-01-10", "purchaseAmountUsd": 4.995 }
+POST http://localhost:8080/api/purchases
+Content-Type: application/json
+
+{
+  "description": "Coffee",
+  "transactionDate": "2024-01-10",
+  "purchaseAmountUsd": 4.995
+}
 ```
 
-**Response:** `201 Created` — `"purchaseAmountUsd": 5.00`
+**Output:**
 
-**Result:** PASS — nearest cent rounding (`HALF_UP`).
-
----
-
-#### TC-API-06: Zero / non-positive amount rejected
-
-**Request:** `POST /api/purchases` with `purchaseAmountUsd: 0`
-
-**Response:** `400 Bad Request`
+```http
+HTTP/1.1 201 Created
+```
 
 ```json
 {
-  "detail": "purchaseAmountUsd: Purchase amount must be positive"
+  "identifier": "47bd666a-217f-4f8a-885e-c9de03bb86ec",
+  "description": "Coffee",
+  "transactionDate": "2024-01-10",
+  "purchaseAmountUsd": 5.00
 }
 ```
 
-**Result:** PASS
+| **Result** | **PASS** — `4.995` rounded to `5.00` (HALF_UP) |
 
 ---
 
-#### TC-API-07: Conversion failure — invalid currency
+### 2.8 TC-API-06: Zero amount rejected
 
-**Request:**
+**Input:**
 
 ```http
-GET /api/purchases/{id}?currency=Invalid-Currency-XYZ
+POST http://localhost:8080/api/purchases
+Content-Type: application/json
+
+{
+  "description": "Zero",
+  "transactionDate": "2024-06-15",
+  "purchaseAmountUsd": 0
+}
 ```
 
-(Purchase dated `2020-01-01`, no Treasury rate for bogus currency)
+**Output:**
 
-**Response:** `422 Unprocessable Entity`
+```http
+HTTP/1.1 400 Bad Request
+```
+
+```json
+{
+  "type": "about:blank#validation-error",
+  "title": "Validation Error",
+  "status": 400,
+  "detail": "purchaseAmountUsd: Purchase amount must be positive",
+  "instance": "/api/purchases"
+}
+```
+
+| **Result** | **PASS** |
+
+---
+
+### 2.9 TC-API-07: Invalid currency (no Treasury rate)
+
+**Input:**
+
+```http
+POST http://localhost:8080/api/purchases
+{ "description": "Test", "transactionDate": "2020-01-01", "purchaseAmountUsd": 10.00 }
+→ identifier: 380a8e00-5adb-4741-9a3c-821cc07106c8
+
+GET http://localhost:8080/api/purchases/380a8e00-5adb-4741-9a3c-821cc07106c8?currency=Invalid-Currency-XYZ
+```
+
+**Output:**
+
+```http
+HTTP/1.1 422 Unprocessable Entity
+```
 
 ```json
 {
   "type": "about:blank#currency-conversion-failed",
   "title": "Currency Conversion Failed",
   "status": 422,
-  "detail": "Purchase cannot be converted to the target currency: no exchange rate found within 6 months on or before the purchase date."
+  "detail": "Purchase cannot be converted to the target currency: no exchange rate found within 6 months on or before the purchase date.",
+  "instance": "/api/purchases/380a8e00-5adb-4741-9a3c-821cc07106c8"
 }
 ```
 
-**Result:** PASS
-
----
-
-#### TC-API-08: Japan-Yen conversion (live Treasury)
-
-**Request:** Store travel purchase; `GET ...?currency=Japan-Yen`
-
-**Response:** `200 OK`
-
-```json
-{
-  "identifier": "670cce46-a5da-4393-97ca-313a9ef96349",
-  "description": "Travel",
-  "transactionDate": "2024-06-15",
-  "originalAmountUsd": 50.00,
-  "exchangeRate": 151.34,
-  "targetCurrency": "Japan-Yen",
-  "convertedAmount": 7567.00
-}
-```
-
-**Result:** PASS — Live Treasury returned a valid rate (differs from unit test mock scenario where Japan-Yen returns 422).
+| **Result** | **PASS** |
 
 ---
 
 ## 3. Requirements Traceability
 
-| Requirement | Automated test coverage | Manual API verification |
-|-------------|-------------------------|-------------------------|
-| Store purchase + unique ID | `PurchaseServiceTest`, integration store | TC-API-01 |
-| Description ≤ 50 chars | `rejectsInvalidDescriptionLength` | TC-API-04 |
-| Positive USD, nearest cent | `MoneyUtilsTest`, `storePersistsRoundedAmount` | TC-API-05, TC-API-06 |
-| Retrieve with conversion | `storeAndRetrievePurchaseWithConversion` | TC-API-02, TC-API-08 |
-| 6-month rate rule | `CurrencyConversionServiceTest` (3 tests) | TC-API-02 (live Treasury) |
-| Error when no rate | `returns422WhenConversionUnavailable` | TC-API-07 |
-| Unknown purchase | `returns404ForUnknownPurchase` | TC-API-03 |
+| Requirement | Automated test(s) | Manual API test(s) |
+|-------------|-------------------|---------------------|
+| Store purchase + unique ID | TEST-IT-01, TEST-UT-06 | TC-API-01 |
+| Description ≤ 50 chars | TEST-IT-02 | TC-API-04 |
+| Positive USD, nearest cent | TEST-UT-01, TEST-UT-06 | TC-API-05, TC-API-06 |
+| Retrieve with conversion | TEST-IT-01, TEST-UT-03 | TC-API-02 |
+| 6-month rate rule | TEST-UT-03, TEST-UT-04, TEST-UT-05 | TC-API-02 (live Treasury) |
+| No rate → error | TEST-IT-03, TEST-UT-04 | TC-API-07 |
+| Unknown purchase → 404 | TEST-IT-04 | TC-API-03 |
+| Treasury cache | TEST-CACHE-01, TEST-CACHE-02 | TC-API-02b |
+| Treasury retry | Code path via `TreasuryHttpClient` | Implicit on live Treasury calls |
 
 ---
 
-## 4. Notes & Observations
+## 4. Test Case Index
 
-1. **Java version:** Use JDK **21** for `mvn test`. JDK 26 on this machine caused Mockito failures in an earlier run.
-2. **Treasury API:** Manual tests depend on network access to `api.fiscaldata.treasury.gov`.
-3. **H2 in-memory:** Data from manual API tests exists only while the application process is running.
-4. **Port 8080:** A second `spring-boot:run` failed with “port already in use” — manual tests used the existing running instance.
-5. **zsh URL tip:** Do not wrap UUIDs in `{curly braces}`; quote URLs containing `?`.
+| ID | Type | Name | Result |
+|----|------|------|--------|
+| TEST-UT-01 | Unit | `roundsToNearestCentHalfUp` | PASS |
+| TEST-UT-02 | Unit | `keepsTwoDecimalPlaces` | PASS |
+| TEST-UT-03 | Unit | `convertsUsingMostRecentRateOnOrBeforePurchaseDate` | PASS |
+| TEST-UT-04 | Unit | `throwsWhenNoRateWithinSixMonthWindow` | PASS |
+| TEST-UT-05 | Unit | `ignoresRatesOlderThanSixMonths` | PASS |
+| TEST-UT-06 | Unit | `storePersistsRoundedAmount` | PASS |
+| TEST-UT-07 | Unit | `retrieveDelegatesToConversionService` | PASS |
+| TEST-IT-01 | Integration | `storeAndRetrievePurchaseWithConversion` | PASS |
+| TEST-IT-02 | Integration | `rejectsInvalidDescriptionLength` | PASS |
+| TEST-IT-03 | Integration | `returns422WhenConversionUnavailable` | PASS |
+| TEST-IT-04 | Integration | `returns404ForUnknownPurchase` | PASS |
+| TEST-CACHE-01 | Cache | `cachesTreasuryRatesForSameLookupKey` | PASS |
+| TEST-CACHE-02 | Cache | `doesNotUseCacheForDifferentCurrency` | PASS |
+| TC-API-01 | Manual | Store purchase | PASS |
+| TC-API-02 | Manual | Retrieve (cache miss) | PASS |
+| TC-API-02b | Manual | Retrieve (cache hit) | PASS |
+| TC-API-03 | Manual | Unknown ID | PASS |
+| TC-API-04 | Manual | Invalid description | PASS |
+| TC-API-05 | Manual | Rounding | PASS |
+| TC-API-06 | Manual | Zero amount | PASS |
+| TC-API-07 | Manual | Invalid currency | PASS |
+
+**Total: 21 test cases · 21 passed · 0 failed**
 
 ---
 
@@ -320,7 +594,8 @@ curl "http://localhost:8080/api/purchases/YOUR-UUID-HERE?currency=Canada-Dollar"
 |----------|----------|
 | Surefire XML reports | `target/surefire-reports/` |
 | This report | `TEST_RESULTS.md` |
+| Design (cache policy) | `DESIGN.md` §6.7 |
 
 ---
 
-*All automated and manual tests executed on 2026-05-22 passed successfully.*
+*All tests executed on 2026-05-22. Automated and manual results: PASS.*

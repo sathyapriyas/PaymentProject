@@ -23,6 +23,7 @@ Java/Spring Boot application that stores USD purchase transactions and retrieves
 - Spring Data JPA + H2
 - RestClient for Treasury API
 - Log4j2 for application logging
+- Spring Retry + Caffeine cache for Treasury API resilience
 
 ## Prerequisites
 
@@ -39,6 +40,16 @@ mvn spring-boot:run
 Application listens on **http://localhost:8080**.
 
 Logging uses **Log4j2** (`log4j2-spring.xml`). Set `com.wex.purchase` to `debug` in `application.yml` for verbose Treasury and conversion traces.
+
+### Treasury API resilience
+
+| Feature | Behavior |
+|---------|----------|
+| **Retry** | Up to 3 attempts with exponential backoff (500ms → 1s → 2s) on network/5xx errors |
+| **Cache** | Caffeine `LoadingCache`: max 5000 keys, 1h expiry, 15m background refresh, `recordStats` |
+| **Failure** | After retries exhausted → HTTP **503** Treasury API Unavailable |
+
+Configure in `application.yml` under `treasury.retry` and `treasury.cache`.
 
 ## API examples
 

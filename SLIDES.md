@@ -1,8 +1,8 @@
 # Wex Purchase Service — Slide Deck Outline
 
 **Audience:** Engineering manager / hiring panel  
-**Duration:** 15–20 minutes (+ 5 min Q&A)  
-**Presenter notes:** Pair with live demo (`mvn spring-boot:run` + curl) on slides 10–11 if time allows.
+**Duration:** 18–22 minutes (+ 5 min Q&A)  
+**Presenter notes:** Pair with live demo (`mvn spring-boot:run` + curl) on slides 11–12 if time allows.
 
 ---
 
@@ -12,7 +12,7 @@
 **Subtitle:** USD purchase storage with U.S. Treasury currency conversion  
 **Footer:** Your name · Date · [GitHub: sathyapriyas/WEXProject](https://github.com/sathyapriyas/WEXProject)
 
-**Speaker notes:** Set context — assessment project built to production-style standards, not a prototype.
+**Speaker notes:** Production-style assessment project — core features plus logging, retry, and caching.
 
 ---
 
@@ -21,14 +21,15 @@
 1. Problem & business requirements  
 2. Solution overview  
 3. Architecture & data flow  
-4. Key design decisions  
-5. Exchange rate logic (core business rule)  
-6. API & data model  
-7. Quality: testing & error handling  
-8. Current limitations  
-9. Roadmap & improvement opportunities  
-10. Demo (optional)  
-11. Q&A  
+4. Treasury integration: retry, cache, logging  
+5. Key design decisions  
+6. Exchange rate logic (core business rule)  
+7. API & data model  
+8. Quality: testing & error handling  
+9. Current limitations  
+10. Roadmap  
+11. Demo (optional)  
+12. Q&A  
 
 ---
 
@@ -40,6 +41,7 @@
 - Organizations record purchases in **USD** but must report or analyze spend in **other currencies**
 - Exchange rates must come from an **authoritative source** — not manual spreadsheets
 - Rules matter: which rate applies on which date, and what to do when no rate exists
+- Production systems need **resilience** when the rate provider is slow or unavailable
 
 **Visual:** Simple before/after — “$100 USD purchase” → “135.50 CAD (using Treasury rate)”
 
@@ -58,7 +60,7 @@
 | 5 | Production-ready code + automated tests |
 | 6 | Plug-and-play: no external database to run locally |
 
-**Speaker notes:** All six are implemented; call out 6-month rule as the most nuanced requirement.
+**Speaker notes:** All six implemented; enhanced with operational hardening (logging, retry, cache).
 
 ---
 
@@ -72,9 +74,9 @@ GET  /api/purchases/{id}     → Retrieve + convert (?currency=Canada-Dollar)
 ```
 
 **Tech stack (footer bar):**  
-Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
+Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury API · **Log4j2** · **Spring Retry** · **Caffeine**
 
-**Speaker notes:** Emphasize REST + JSON, stateless API, embedded DB for reviewer convenience.
+**Speaker notes:** REST + JSON, stateless API, embedded DB; Treasury calls are cached and retried.
 
 ---
 
@@ -82,16 +84,18 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 
 **Headline:** Who talks to whom  
 
-**Diagram (draw or paste):**
+**Diagram:**
 ```
 [Client] ──HTTP JSON──► [Wex Purchase Service] ──► [H2 Database]
                               │
-                              └──► [U.S. Treasury Fiscal Data API]
+                              └──► [U.S. Treasury API]
+                                    (retry + 24h cache)
 ```
 
 **Bullets:**
-- Treasury API is **public read-only** (no API key in v1)
-- H2 is **in-memory** — zero install for developers and reviewers
+- Treasury API is **public read-only** (no API key)
+- H2 is **in-memory** — zero install for reviewers
+- Repeat currency lookups served from **in-memory cache**
 
 ---
 
@@ -101,16 +105,51 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 
 | Layer | Components | Responsibility |
 |-------|------------|----------------|
-| Presentation | `PurchaseController` | HTTP, validation, status codes |
+| Presentation | `PurchaseController` | HTTP, validation, logging |
 | Business | `PurchaseService`, `CurrencyConversionService` | Rules, orchestration, math |
-| Data | `PurchaseTransactionRepository`, JPA entity | Persistence |
-| Integration | `TreasuryExchangeRateClient` | External API |
+| Data | `PurchaseTransactionRepository` | Persistence |
+| Integration | `TreasuryExchangeRateClient`, `TreasuryHttpClient` | Cached + retried Treasury access |
+| Cross-cutting | `CacheRetryConfig`, `ApiExceptionHandler` | Cache/retry config, error mapping |
 
-**Speaker notes:** Standard Spring layering — easy to test, easy to extend (e.g. swap H2 for PostgreSQL).
+**Speaker notes:** Treasury split into cached facade + retryable HTTP client for correct Spring AOP behavior.
 
 ---
 
-## Slide 8 — Design Decisions (What & Why)
+## Slide 8 — Treasury Resilience & Logging (NEW)
+
+**Headline:** Production-oriented external API integration  
+
+### Retry (Spring Retry)
+| Setting | Value |
+|---------|-------|
+| Max attempts | 3 |
+| Backoff | 500ms → 1s → 2s (exponential) |
+| Retries on | Network errors, 5xx |
+| Exhausted | HTTP **503** Treasury API Unavailable |
+
+### Cache (Caffeine)
+| Setting | Value |
+|---------|-------|
+| Key | `currency \| purchaseDate \| windowStart` |
+| TTL | 24 hours |
+| Max entries | 500 |
+| Benefit | Repeat GETs avoid Treasury HTTP call |
+
+### Logging (Log4j2)
+- **INFO:** store/retrieve requests, persisted IDs, conversion results
+- **WARN:** validation errors, missing rates, retry failures
+- **DEBUG:** cache misses, Treasury API parameters (enable via config)
+
+**Call chain:**
+```
+@Cacheable TreasuryExchangeRateClient → @Retryable TreasuryHttpClient → RestClient
+```
+
+**Speaker notes:** This slide answers “how do you handle Treasury being down or slow?”
+
+---
+
+## Slide 9 — Design Decisions (What & Why)
 
 **Headline:** Deliberate choices, not defaults  
 
@@ -118,53 +157,54 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 |----------|-----------|
 | `BigDecimal` for money | Eliminates floating-point errors |
 | UUID primary keys | Globally unique; distributed-ready |
-| DTOs vs. entity | Stable API if persistence changes |
 | HTTP **422** for conversion failure | Purchase exists; business rule blocks conversion |
-| Mock Treasury in tests | Deterministic CI, no network flakiness |
-| Java 21 LTS | Supportability (spec cited JDK 25; 21 is deployable today) |
-
-**Speaker notes:** Pick 2–3 to expand if asked in Q&A.
+| HTTP **503** after retry exhaustion | Distinguishes upstream outage from bad input |
+| **Log4j2** over default Logback | Explicit, configurable production logging |
+| **Cache + retry as separate beans** | Correct AOP ordering; testable in isolation |
+| Mock Treasury in tests | Deterministic CI (13 tests) |
+| Java 21 LTS | Widely deployable today |
 
 ---
 
-## Slide 9 — Exchange Rate Logic (Deep Dive)
+## Slide 10 — Exchange Rate Logic (Deep Dive)
 
 **Headline:** The 6-month lookback rule  
 
-**Algorithm (bullets):**
+**Algorithm:**
 1. Window: `[purchaseDate − 6 months, purchaseDate]`
-2. Query Treasury: matching `country_currency_desc`, `record_date` in window
-3. Sort by date **descending** → take **most recent** rate on or before purchase date
-4. `convertedAmount = USD × rate`, round to **2 decimals** (nearest cent)
-5. If no rate → **422** with explicit error message
+2. Resolve rates via **cache** (or Treasury API on miss, with **retry**)
+3. Sort by date **descending** → take **most recent** qualifying rate
+4. `convertedAmount = USD × rate`, round to **2 decimals**
+5. If no rate → **422** | If Treasury down → **503**
 
 **Example:** Purchase 2024-06-15, Canada-Dollar → rate 2024-03-31 @ 1.355 → $100 → **$135.50**
 
-**Speaker notes:** This slide proves you understood the hardest requirement.
-
 ---
 
-## Slide 10 — API & Data Model
+## Slide 11 — API & Data Model
 
 **Headline:** Contracts are explicit  
 
-**Store response fields:** identifier, description, transactionDate, purchaseAmountUsd  
+**Store response:** identifier, description, transactionDate, purchaseAmountUsd  
 
-**Retrieve response fields:** identifier, description, transactionDate, originalAmountUsd, exchangeRate, targetCurrency, convertedAmount  
+**Retrieve response:** identifier, description, transactionDate, originalAmountUsd, exchangeRate, targetCurrency, convertedAmount  
 
-**Persistence:** `PurchaseTransaction` — UUID, description (50), date, amountUsd (19,2)
+**Error responses (ProblemDetail JSON):** 400, 404, 422, **503**
 
 **Speaker notes:** Currency param = Treasury `country_currency_desc` (e.g. `Canada-Dollar`).
 
 ---
 
-## Slide 11 — Quality & Reliability
+## Slide 12 — Quality & Reliability
 
-**Headline:** Built for production baseline  
+**Headline:** Built and verified for production baseline  
 
-**Testing (11 tests):**
-- Unit: rounding, 6-month rule, service logic  
-- Integration: full HTTP store + retrieve (Treasury mocked)  
+**Testing (13 tests — all passing):**
+| Category | Tests |
+|----------|-------|
+| Unit | Rounding, 6-month rule, service logic |
+| Integration | Full HTTP store + retrieve (Treasury mocked) |
+| Cache | Verifies single HTTP call for duplicate lookups |
 
 **Error handling:**
 | Case | HTTP |
@@ -172,85 +212,93 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 | Invalid input | 400 |
 | Unknown purchase | 404 |
 | No rate in window | 422 |
+| Treasury unavailable (after retries) | **503** |
 
-**Speaker notes:** Non-functional tests (load/perf) explicitly out of scope per requirements.
+**Operational:** Log4j2 logs at controller, service, and client layers.
 
 ---
 
-## Slide 12 — Live Demo (Optional)
+## Slide 13 — Live Demo (Optional)
 
 **Headline:** End-to-end in under 2 minutes  
 
-1. `mvn spring-boot:run`  
+1. `mvn spring-boot:run` — observe Log4j2 startup logs  
 2. `POST /api/purchases` — store $100 office supplies  
-3. `GET /api/purchases/{id}?currency=Canada-Dollar` — show conversion  
-4. (Optional) Invalid currency or date → show 422/400  
+3. `GET ...?currency=Canada-Dollar` — first call hits Treasury (with retry if needed)  
+4. Repeat same GET — **cache hit** (faster; check DEBUG logs)  
+5. (Optional) Invalid currency → 422  
 
-**Fallback if no network:** Show test output `mvn test` — all green.
+**Fallback:** `mvn test` — 13 tests green.
 
 ---
 
-## Slide 13 — Current Limitations (Honest Assessment)
+## Slide 14 — Current Limitations (Honest Assessment)
 
-**Headline:** Known gaps in v1 — by design  
+**Headline:** Remaining gaps  
 
 - H2 in-memory → **data lost on restart**  
-- **Synchronous** Treasury call on every GET → latency + availability coupling  
-- **No authentication** — fine for assessment; required for production  
+- Cache is **per-instance** — not shared in multi-pod deployment (use Redis later)  
+- **No circuit breaker** — sustained Treasury outage still attempts 3 retries  
+- **No authentication** — required for production  
 - Currency is free-text — typos fail at lookup  
 - No CI/CD pipeline in repo yet  
 
-**Speaker notes:** Framing limitations as a roadmap input shows maturity.
+**Speaker notes:** Retry/cache/logging address the biggest operational gaps from v1.
 
 ---
 
-## Slide 14 — Improvement Roadmap
+## Slide 15 — Roadmap
 
-**Headline:** Path to production  
+**Headline:** Evolution path  
 
-| Phase | Focus | Examples |
-|-------|-------|----------|
-| **1 ✓ Done** | Core requirements + tests | Current delivery |
-| **2** (1–2 wks) | Hardening | PostgreSQL, Flyway, Actuator, GitHub Actions |
-| **3** (2–4 wks) | Resilience & UX | Rate cache, retry, OpenAPI, currency aliases |
-| **4** | Enterprise | AuthN/Z, metrics, audit log, scale |
+| Phase | Status | Focus |
+|-------|--------|-------|
+| **1** | ✓ Done | Core requirements, tests, docs |
+| **2** | ✓ Done | Log4j2, Treasury retry, Caffeine cache, 503 handling |
+| **3** | Next | PostgreSQL, Flyway, Actuator, GitHub Actions |
+| **4** | Planned | Circuit breaker, OpenAPI, currency aliases, contract tests |
+| **5** | Future | AuthN/Z, distributed cache, performance baseline |
 
 ---
 
-## Slide 15 — Risk Register (Summary)
+## Slide 16 — Risk Register (Summary)
 
 | Risk | Mitigation |
 |------|------------|
-| Treasury API down | Retry + cache + clear errors |
-| Treasury schema change | Contract tests, monitoring |
-| Financial miscalculation | BigDecimal + unit tests with known rates |
-| Data loss (H2) | PostgreSQL for production |
+| Treasury API down | **Retry (3×) + cache + HTTP 503** |
+| Treasury schema change | Contract tests, monitoring (planned) |
+| Stale cached rates | 24h TTL; Treasury data is quarterly |
+| Financial miscalculation | BigDecimal + unit tests |
+| Data loss (H2) | PostgreSQL (planned) |
 
 ---
 
-## Slide 16 — Summary & Ask
+## Slide 17 — Summary & Ask
 
 **Headline:** What we delivered  
 
 ✅ Both functional requirements  
 ✅ Financial precision (`BigDecimal`, cent rounding)  
-✅ Documented 6-month conversion rule  
-✅ Automated tests + design documentation  
+✅ 6-month conversion rule with clear errors  
+✅ **Log4j2** structured logging  
+✅ **Spring Retry** + **Caffeine cache** for Treasury API  
+✅ **13 automated tests** + design documentation  
 ✅ Clear upgrade path to production  
 
-**Ask:** Questions? Happy to deep-dive on architecture, testing, or roadmap.
+**Ask:** Questions? Happy to deep-dive on retry/cache design, logging, or roadmap.
 
 ---
 
-## Slide 17 — Appendix / Backup Slides
+## Slide 18 — Appendix / Backup Slides
 
 *Hide unless Q&A needs detail*
 
 - **A1:** Full project structure (`com.wex.purchase.*`)  
 - **A2:** Treasury API filter syntax example  
-- **A3:** Maven commands & Java 21 setup  
-- **A4:** GitHub repo link & README  
-- **A5:** Reference to `DESIGN.md` for full technical spec  
+- **A3:** `application.yml` — retry & cache settings  
+- **A4:** `log4j2-spring.xml` — log levels and pattern  
+- **A5:** Maven commands & Java 21 setup  
+- **A6:** GitHub repo · `DESIGN.md` · `TEST_RESULTS.md`  
 
 ---
 
@@ -259,10 +307,10 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 | Slides | Minutes |
 |--------|---------|
 | 1–5 | 4 |
-| 6–9 | 6 |
-| 10–11 | 4 |
+| 6–8 | 5 |
+| 9–11 | 5 |
 | 12 (demo) | 3 |
-| 13–16 | 4 |
+| 13–17 | 4 |
 | Q&A | 5 |
 
 ---
@@ -273,13 +321,20 @@ Java 21 · Spring Boot 3.4 · Maven · H2 · Treasury REST API
 export JAVA_HOME="/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
 mvn spring-boot:run
 
+# Store
 curl -X POST http://localhost:8080/api/purchases \
   -H "Content-Type: application/json" \
   -d '{"description":"Office supplies","transactionDate":"2024-06-15","purchaseAmountUsd":100.00}'
 
-curl "http://localhost:8080/api/purchases/{UUID}?currency=Canada-Dollar"
+# Convert (replace UUID — no curly braces in zsh)
+curl "http://localhost:8080/api/purchases/YOUR-UUID-HERE?currency=Canada-Dollar"
+
+# Same request again — cache hit (faster second time)
+curl "http://localhost:8080/api/purchases/YOUR-UUID-HERE?currency=Canada-Dollar"
 ```
+
+**Enable debug logging** (optional): set `com.wex.purchase: debug` in `application.yml`.
 
 ---
 
-*See `DESIGN.md` for the complete technical design document.*
+*See `DESIGN.md` (v1.1) for the complete technical design including logging, retry, and caching.*
