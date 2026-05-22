@@ -10,7 +10,7 @@
 
 | Test suite | Tests | Passed | Failed | Skipped | Result |
 |------------|-------|--------|--------|---------|--------|
-| Automated (`mvn test`) | 13 | 13 | 0 | 0 | **PASS** |
+| Automated (`mvn test`) | 28 | 28 | 0 | 0 | **PASS** |
 | Manual API (`localhost:8080`) | 8 | 8 | 0 | 0 | **PASS** |
 
 **Overall status: PASS**
@@ -33,11 +33,12 @@ mvn test
 ### 1.2 Build Result (Output)
 
 ```
-Tests run: 13, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 28, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
-Total time:  6.244 s
-Finished at: 2026-05-22T13:29:23-04:00
+Finished at: 2026-05-22T14:09:41-04:00
 ```
+
+**Breakdown by class:** `MoneyUtilsTest` 2 · `CurrencyConversionServiceTest` 7 · `PurchaseServiceTest` 2 · `PurchaseControllerIntegrationTest` 13 · `TreasuryHttpClientRetryTest` 2 · `TreasuryExchangeRateClientCacheTest` 2
 
 ---
 
@@ -63,7 +64,7 @@ Finished at: 2026-05-22T13:29:23-04:00
 
 ---
 
-### 1.4 `CurrencyConversionServiceTest` (3 tests)
+### 1.4 `CurrencyConversionServiceTest` (7 tests)
 
 #### TEST-UT-03: `convertsUsingMostRecentRateOnOrBeforePurchaseDate`
 
@@ -95,6 +96,38 @@ Finished at: 2026-05-22T13:29:23-04:00
 | **Actual** | Exception thrown |
 | **Result** | **PASS** |
 
+#### TEST-UT-08: `selectsRateOnExactPurchaseDate`
+
+| | Value |
+|---|--------|
+| **Input** | Rate `1.400` on `2024-06-15` (same as purchase date) |
+| **Expected** | `exchangeRate=1.400`, `convertedAmount=140.00` |
+| **Result** | **PASS** |
+
+#### TEST-UT-09: `selectsRateOnSixMonthBoundary`
+
+| | Value |
+|---|--------|
+| **Input** | Rate on `2023-12-15` (exactly 6 months before `2024-06-15`) |
+| **Expected** | `exchangeRate=1.326`, `convertedAmount=132.60` |
+| **Result** | **PASS** |
+
+#### TEST-UT-10: `usesFirstQualifyingRateInListOrder`
+
+| | Value |
+|---|--------|
+| **Input** | Unsorted mock list; older rate listed first |
+| **Expected** | First qualifying rate (`1.326` @ `2023-12-31`) is selected |
+| **Result** | **PASS** |
+
+#### TEST-UT-11: `throwsWhenExchangeRateIsNotNumeric`
+
+| | Value |
+|---|--------|
+| **Input** | `exchange_rate="not-a-number"` |
+| **Expected** | `NumberFormatException` |
+| **Result** | **PASS** |
+
 ---
 
 ### 1.5 `PurchaseServiceTest` (2 tests)
@@ -120,7 +153,7 @@ Finished at: 2026-05-22T13:29:23-04:00
 
 ---
 
-### 1.6 `PurchaseControllerIntegrationTest` (4 tests)
+### 1.6 `PurchaseControllerIntegrationTest` (13 tests)
 
 *Profile: `test` · Treasury client mocked · Log4j2 active*
 
@@ -223,9 +256,51 @@ Finished at: 2026-05-22T13:29:23-04:00
 | **Actual** | `404 Not Found` |
 | **Result** | **PASS** |
 
+#### TEST-IT-05: `returns503WhenTreasuryApiUnavailable`
+
+| | Value |
+|---|--------|
+| **Input** | `GET` after store; mock throws `TreasuryApiUnavailableException` |
+| **Expected** | HTTP `503`, title `Treasury API Unavailable` |
+| **Result** | **PASS** |
+
+#### TEST-IT-06–12: GET/POST validation boundaries
+
+| ID | Test | Expected | Result |
+|----|------|----------|--------|
+| TEST-IT-06 | `rejectsMissingCurrencyParam` | `400` | **PASS** |
+| TEST-IT-07 | `rejectsBlankCurrencyParam` | `400` (ConstraintViolation) | **PASS** |
+| TEST-IT-08 | `rejectsInvalidPurchaseIdFormat` | `400` | **PASS** |
+| TEST-IT-09 | `acceptsDescriptionAtMaxLength50` | `201` | **PASS** |
+| TEST-IT-10 | `rejectsBlankDescription` | `400` | **PASS** |
+| TEST-IT-11 | `rejectsMissingRequiredFields` | `400` | **PASS** |
+| TEST-IT-12 | `acceptsMinimumPurchaseAmount` / `rejectsNegativePurchaseAmount` | `201` / `400` | **PASS** |
+
 ---
 
-### 1.7 `TreasuryExchangeRateClientCacheTest` (2 tests)
+### 1.7 `TreasuryHttpClientRetryTest` (2 tests)
+
+*Spring Retry enabled; mocked `RestClient`; fast retry (`1 ms`, 3 attempts)*
+
+#### TEST-RETRY-01: `retriesThenSucceedsOnThirdAttempt`
+
+| | Value |
+|---|--------|
+| **Input** | Two `ResourceAccessException`, then success |
+| **Expected** | Rates returned; exactly 3 HTTP attempts |
+| **Result** | **PASS** |
+
+#### TEST-RETRY-02: `throws503AfterExhaustingRetries`
+
+| | Value |
+|---|--------|
+| **Input** | Three consecutive failures |
+| **Expected** | `TreasuryApiUnavailableException` after 3 attempts |
+| **Result** | **PASS** |
+
+---
+
+### 1.8 `TreasuryExchangeRateClientCacheTest` (2 tests)
 
 *Validates Caffeine `LoadingCache` policy (mocked `TreasuryHttpClient`)*
 
@@ -533,6 +608,10 @@ HTTP/1.1 422 Unprocessable Entity
 | 6-month rate rule | TEST-UT-03, TEST-UT-04, TEST-UT-05 | TC-API-02 (live Treasury) |
 | No rate → error | TEST-IT-03, TEST-UT-04 | TC-API-07 |
 | Unknown purchase → 404 | TEST-IT-04 | TC-API-03 |
+| Treasury unavailable → 503 | TEST-IT-05, TEST-RETRY-02 | — |
+| GET/POST validation boundaries | TEST-IT-06–12 | TC-API-04, TC-API-06 |
+| Rate boundary dates (exact / 6-month) | TEST-UT-08, TEST-UT-09 | TC-API-02 |
+| Treasury retry on transient failure | TEST-RETRY-01 | — |
 | Treasury cache | TEST-CACHE-01, TEST-CACHE-02 | TC-API-02b |
 | Treasury retry | Code path via `TreasuryHttpClient` | Implicit on live Treasury calls |
 
@@ -547,12 +626,20 @@ HTTP/1.1 422 Unprocessable Entity
 | TEST-UT-03 | Unit | `convertsUsingMostRecentRateOnOrBeforePurchaseDate` | PASS |
 | TEST-UT-04 | Unit | `throwsWhenNoRateWithinSixMonthWindow` | PASS |
 | TEST-UT-05 | Unit | `ignoresRatesOlderThanSixMonths` | PASS |
+| TEST-UT-08 | Unit | `selectsRateOnExactPurchaseDate` | PASS |
+| TEST-UT-09 | Unit | `selectsRateOnSixMonthBoundary` | PASS |
+| TEST-UT-10 | Unit | `usesFirstQualifyingRateInListOrder` | PASS |
+| TEST-UT-11 | Unit | `throwsWhenExchangeRateIsNotNumeric` | PASS |
 | TEST-UT-06 | Unit | `storePersistsRoundedAmount` | PASS |
 | TEST-UT-07 | Unit | `retrieveDelegatesToConversionService` | PASS |
 | TEST-IT-01 | Integration | `storeAndRetrievePurchaseWithConversion` | PASS |
 | TEST-IT-02 | Integration | `rejectsInvalidDescriptionLength` | PASS |
 | TEST-IT-03 | Integration | `returns422WhenConversionUnavailable` | PASS |
 | TEST-IT-04 | Integration | `returns404ForUnknownPurchase` | PASS |
+| TEST-IT-05 | Integration | `returns503WhenTreasuryApiUnavailable` | PASS |
+| TEST-IT-06–12 | Integration | GET/POST validation boundaries | PASS |
+| TEST-RETRY-01 | Client | `retriesThenSucceedsOnThirdAttempt` | PASS |
+| TEST-RETRY-02 | Client | `throws503AfterExhaustingRetries` | PASS |
 | TEST-CACHE-01 | Cache | `cachesTreasuryRatesForSameLookupKey` | PASS |
 | TEST-CACHE-02 | Cache | `doesNotUseCacheForDifferentCurrency` | PASS |
 | TC-API-01 | Manual | Store purchase | PASS |
