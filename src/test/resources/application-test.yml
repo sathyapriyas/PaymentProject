@@ -8,3 +8,11 @@ spring:
 treasury:
   api:
     base-url: http://localhost:9999/mock
+  retry:
+    max-attempts: 2
+    initial-delay-ms: 10
+    multiplier: 1.0
+  cache:
+    maximum-size: 5000
+    expire-after-write-hours: 1
+    refresh-after-write-minutes: 15

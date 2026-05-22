@@ -1,7 +1,7 @@
 # Wex Purchase Service — Design Document
 
-**Version:** 1.0  
-**Date:** May 2026  
+**Version:** 1.2  
+**Date:** May 2026 (updated for Log4j2, retry, and LoadingCache policy)  
 **Audience:** Engineering leadership, hiring managers, technical reviewers  
 **Repository:** [sathyapriyas/WEXProject](https://github.com/sathyapriyas/WEXProject)
 
@@ -11,7 +11,7 @@
 
 The **Wex Purchase Service** is a production-style Java application that stores USD purchase transactions and retrieves them converted into foreign currencies using official exchange rates from the [U.S. Treasury Reporting Rates of Exchange API](https://fiscaldata.treasury.gov/datasets/treasury-reporting-rates-exchange/treasury-reporting-rates-of-exchange).
 
-The solution prioritizes **financial accuracy**, **clear business rules** (6-month lookback for rates), **developer portability** (no external database required to run locally), and **automated test coverage** suitable for a production deployment baseline.
+The solution prioritizes **financial accuracy**, **clear business rules** (6-month lookback for rates), **developer portability** (no external database required to run locally), **operational resilience** (retry and cache for the Treasury API), **structured logging** (Log4j2), and **automated test coverage** suitable for a production deployment baseline.
 
 | Dimension | Choice |
 |-----------|--------|
@@ -21,6 +21,8 @@ The solution prioritizes **financial accuracy**, **clear business rules** (6-mon
 | Persistence | Embedded H2 (in-memory) |
 | External integration | Treasury Fiscal Data REST API |
 | API style | REST (JSON) |
+| Logging | Log4j2 (`log4j2-spring.xml`) |
+| Treasury resilience | Spring Retry + Caffeine `LoadingCache` |
 
 ---
 
@@ -50,6 +52,9 @@ Organizations need to record purchase transactions in USD and later report or an
 | No external DB for local dev | Embedded H2 (requirement constraint) |
 | Maintainability | Layered architecture, separation of concerns |
 | Testability | Unit + integration tests; Treasury API mocked in tests |
+| Resilience | Retry with exponential backoff on transient Treasury failures |
+| Performance (reads) | Caffeine `LoadingCache`: 1h expiry, 15m background refresh, 5000 entry cap |
+| Observability | Log4j2 at INFO/WARN/DEBUG across controller, service, client layers |
 
 ---
 
@@ -75,8 +80,9 @@ Organizations need to record purchase transactions in USD and later report or an
               ▼                ▼                ▼
      ┌────────────┐   ┌──────────────┐   ┌──────────────────┐
      │ H2 Database│   │ Treasury API │   │ (Future: Auth,   │
-     │ (embedded) │   │ (Fiscal Data)│   │  metrics, cache) │
-     └────────────┘   └──────────────┘   └──────────────────┘
+     │ (embedded) │   │ (Fiscal Data)│   │  Actuator metrics)│
+     └────────────┘   │ + Retry/Cache│   └──────────────────┘
+                      └──────────────┘
 ```
 
 ### 3.2 External Dependency: Treasury API
@@ -93,6 +99,27 @@ filter=country_currency_desc:eq:Canada-Dollar,
        record_date:lte:2024-06-15,
        record_date:gte:2023-12-15
 sort=-record_date
+```
+
+### 3.3 Treasury Integration Resilience (Implemented)
+
+Treasury rate lookups are wrapped in two cross-cutting concerns:
+
+| Concern | Technology | Purpose |
+|---------|------------|---------|
+| **Retry** | Spring Retry (`@Retryable`) | Recover from transient network or 5xx errors |
+| **Cache** | Caffeine `LoadingCache` (`TreasuryRateCache`) | Auto-load, refresh, and evict Treasury rate responses |
+
+Call chain:
+
+```
+TreasuryExchangeRateClient  (facade)
+        ↓
+TreasuryRateCache           (LoadingCache — hit / refresh / load)
+        ↓ loader invokes on miss or background refresh
+TreasuryHttpClient          (@Retryable)
+        ↓
+RestClient → Treasury API
 ```
 
 ---
@@ -117,24 +144,30 @@ The application follows a **three-tier, Spring-aligned** structure:
                              │
         ┌────────────────────┼────────────────────┐
         ▼                    ▼                    ▼
-┌───────────────┐  ┌─────────────────┐  ┌──────────────────┐
-│ Repository    │  │ Treasury Client │  │ Exception Handler │
-│ (JPA/H2)      │  │ (RestClient)    │  │ (RFC 7807-style)  │
-└───────────────┘  └─────────────────┘  └──────────────────┘
+┌───────────────┐  ┌─────────────────────────┐  ┌──────────────────┐
+│ Repository    │  │ Treasury Integration    │  │ Exception Handler │
+│ (JPA/H2)      │  │ LoadingCache + Retry    │  │ (RFC 7807-style)  │
+└───────────────┘  │ HTTP client (RestClient)│  └──────────────────┘
+                   └─────────────────────────┘
 ```
 
 ### 4.2 Component Responsibilities
 
 | Component | Responsibility |
 |-----------|------------------|
-| `PurchaseController` | HTTP mapping, input validation triggers, status codes |
+| `PurchaseController` | HTTP mapping, input validation triggers, status codes; request/response logging |
 | `PurchaseService` | Store/retrieve workflows, coordinates persistence + conversion |
 | `CurrencyConversionService` | Business rules for rate selection and amount calculation |
-| `TreasuryExchangeRateClient` | HTTP integration, query construction, response mapping |
+| `TreasuryExchangeRateClient` | Facade delegating to `TreasuryRateCache` |
+| `TreasuryRateCache` | Caffeine `LoadingCache` with expiry, refresh, stats, and auto-loader |
+| `TreasuryRateCacheKey` | Cache key record (`currency`, `purchaseDate`, `earliestAllowedDate`) |
+| `TreasuryHttpClient` | HTTP calls with retry on transient failures (`@Retryable`) |
+| `CacheRetryConfig` | Enables Spring Retry; retry listener for operational logging |
+| `TreasuryProperties` | Externalized retry and cache settings |
 | `PurchaseTransactionRepository` | CRUD via Spring Data JPA |
 | `PurchaseTransaction` | Persistence entity |
 | DTOs (`CreatePurchaseRequest`, `*Response`) | API contract separation from persistence |
-| `ApiExceptionHandler` | Consistent error responses |
+| `ApiExceptionHandler` | Consistent error responses (400, 404, 422, 503) |
 | `MoneyUtils` | Centralized monetary rounding |
 
 ### 4.3 Request Flows
@@ -158,11 +191,37 @@ GET /api/purchases/{id}?currency=Canada-Dollar
   → Load transaction by UUID (404 if missing)
   → CurrencyConversionService.convert()
       → Compute earliestAllowed = transactionDate - 6 months
-      → Treasury API: filter by currency + date window, sort desc
+      → TreasuryExchangeRateClient.findRates() [cache lookup]
+          → cache hit: return cached rates (no HTTP)
+          → cache miss: TreasuryHttpClient.fetchRates() [with retry]
+              → Treasury API: filter by currency + date window, sort desc
       → Select first rate on or before purchase date in window
       → convertedAmount = amountUsd × exchangeRate (round to 2 dp)
   → 200 OK + ConvertedPurchaseResponse
       OR 422 if no rate in window
+      OR 503 if Treasury API unavailable after retries
+```
+
+#### Flow C — Treasury API with LoadingCache & Retry
+
+```
+findRates(currency, purchaseDate, earliestAllowed)
+  → key = TreasuryRateCacheKey(currency, purchaseDate, earliestAllowed)
+  → exchangeRateCache.get(key)
+
+  [CACHE HIT — fresh]
+      → return cached List<RateRecord> immediately (no HTTP)
+
+  [CACHE HIT — eligible for refresh, age > 15 min]
+      → return cached value immediately (low latency)
+      → background loader calls TreasuryHttpClient.fetchRates() (with retry)
+
+  [CACHE MISS or expired — age > 1 hour]
+      → synchronous loader: TreasuryHttpClient.fetchRates()
+            → Attempt 1: RestClient GET
+            → on failure: backoff 500ms → Attempt 2 → backoff 1s → Attempt 3
+            → all failed: TreasuryApiUnavailableException → HTTP 503
+      → store result in cache, return rates
 ```
 
 ---
@@ -235,11 +294,16 @@ Clients pass Treasury `country_currency_desc` values (e.g. `Canada-Dollar`, `Jap
 | D4 | **HALF_UP rounding to 2 decimals** | Matches “nearest cent” requirement for stored and converted amounts | Must document for auditors; consistent with US currency norms |
 | D5 | **Embedded H2** | Satisfies “plug and play” / no external DB; zero install friction for reviewers | Data lost on restart; not suitable for multi-instance production as-is |
 | D6 | **UUID primary keys** | Globally unique, no DB sequence coordination, safe for distributed IDs later | Larger index size vs. `BIGINT` |
-| D7 | **RestClient for Treasury** | Modern Spring 6+ HTTP client; simple for GET-only integration | No built-in retry/circuit breaker in v1 |
+| D7 | **RestClient for Treasury** | Modern Spring 6+ HTTP client; simple for GET-only integration | Retry/cache layered separately for clarity |
 | D8 | **Server-side 6-month filter + client-side validation** | Defense in depth if API returns edge-case rows | Redundant checks; acceptable for correctness |
 | D9 | **HTTP 422 for conversion failures** | Distinguishes “resource exists but business rule blocks action” from 404 | Alternative: 404 or 400 — 422 chosen for semantic clarity |
 | D10 | **DTOs separate from entity** | Stable API contract if persistence changes | Extra mapping boilerplate |
 | D11 | **Mock Treasury in tests** | Deterministic CI; no network flakiness | Does not catch Treasury API schema changes |
+| D12 | **Log4j2 (replace default Logback)** | Explicit logging framework; configurable appenders and levels | Requires excluding `spring-boot-starter-logging` from starters |
+| D13 | **Spring Retry on `TreasuryHttpClient`** | Handles transient outages without custom retry loops | Requires Spring AOP; not applied to private/self-invoked methods |
+| D14 | **Caffeine `LoadingCache` (not Spring `@Cacheable`)** | Supports `refreshAfterWrite`, `recordStats`, and explicit loader; matches financial-services caching patterns | More code than annotation-driven cache |
+| D15 | **1h expire + 15m refresh** | Hard stop on stale data; background refresh avoids blocking reads | Slightly more Treasury traffic than long TTL |
+| D16 | **Split cache, HTTP client, and facade** | Loader calls retried HTTP client; cache independent of Spring AOP | Three classes instead of one |
 
 ### 6.2 Financial Precision Strategy
 
@@ -278,7 +342,116 @@ This implements: *“rate less than or equal to purchase date from within the la
 | Validation failure (length, null, non-positive amount) | 400 | `MethodArgumentNotValidException` → `ProblemDetail` |
 | Purchase ID not found | 404 | `PurchaseNotFoundException` |
 | No Treasury rate in window | 422 | `CurrencyConversionException` |
-| Treasury API down / timeout | 500 (default) | Uncaught `RestClientException` — improvement area |
+| Treasury API down after retries | 503 | `TreasuryApiUnavailableException` → `ApiExceptionHandler` |
+
+### 6.5 Logging Strategy (Log4j2)
+
+| Area | Level | What is logged |
+|------|-------|----------------|
+| `PurchaseController` | INFO | Incoming store/retrieve requests; created purchase IDs |
+| `PurchaseService` | INFO / DEBUG | Persisted amounts; conversion orchestration |
+| `CurrencyConversionService` | INFO / WARN | Selected exchange rate; missing rate in window |
+| `TreasuryRateCache` | INFO / DEBUG | Loader invocations; hit rate and eviction stats at DEBUG |
+| `TreasuryExchangeRateClient` | DEBUG | Delegating to `TreasuryRateCache` |
+| `TreasuryHttpClient` | DEBUG / WARN | API call parameters; empty responses |
+| `ApiExceptionHandler` | WARN / ERROR | Validation, 404, 422, 503 errors |
+| `TreasuryRetry` (listener) | WARN | Failed attempt number before retry |
+
+**Configuration files:**
+- `log4j2-spring.xml` — console appender, pattern layout, package levels
+- `application.yml` — `logging.config`, `com.wex.purchase` level (default `info`)
+
+### 6.6 Retry Configuration
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `treasury.retry.max-attempts` | 3 | Total attempts including first call |
+| `treasury.retry.initial-delay-ms` | 500 | Delay before second attempt |
+| `treasury.retry.multiplier` | 2.0 | Exponential backoff multiplier |
+
+**Retried exceptions:** `RestClientException`, `ResourceAccessException`, `HttpServerErrorException`
+
+**Backoff sequence (default):** 500ms → 1000ms → (attempt 3, no further delay before fail)
+
+### 6.7 Treasury API Caching Policy
+
+Treasury rate lookups use a **Caffeine `LoadingCache`** configured for financial workloads: bounded memory, a hard freshness limit, proactive background refresh, and operational metrics.
+
+#### 6.7.1 Implementation
+
+```java
+LoadingCache<TreasuryRateCacheKey, List<TreasuryRateRecord>> exchangeRateCache =
+    Caffeine.newBuilder()
+        // 1. Memory safety net
+        .maximumSize(5000)
+        // 2. Financial hard stop (evict rates older than 1 hour)
+        .expireAfterWrite(Duration.ofHours(1))
+        // 3. Low-latency performance (background updates every 15 minutes)
+        .refreshAfterWrite(Duration.ofMinutes(15))
+        // 4. Operational visibility
+        .recordStats()
+        // 5. Auto-loader — delegates to TreasuryHttpClient (with retry)
+        .build(key -> treasuryHttpClient.fetchRates(
+            key.targetCurrency(), key.purchaseDate(), key.earliestAllowedDate()));
+```
+
+**Class:** `TreasuryRateCache`  
+**Access:** `TreasuryExchangeRateClient.findRates()` → `rateCache.get(...)`
+
+#### 6.7.2 Policy Rationale
+
+| Policy | Value | Why |
+|--------|-------|-----|
+| **maximumSize(5000)** | 5000 keys | Caps heap use for many currency/date-window combinations |
+| **expireAfterWrite(1 hour)** | Hard eviction | Financial hard stop — rates older than one hour are never served |
+| **refreshAfterWrite(15 min)** | Background reload | After 15 minutes, reads return cached data immediately while refresh runs asynchronously |
+| **recordStats()** | Hit rate, loads, evictions | Supports debugging and future Actuator/metrics exposure |
+| **LoadingCache loader** | Calls `TreasuryHttpClient` | Single code path for initial load and refresh; retry applied inside HTTP client |
+
+#### 6.7.3 Cache Key
+
+Keys are **`TreasuryRateCacheKey`** records (not currency pair alone), because Treasury rates depend on the purchase date and 6-month lookback window:
+
+| Field | Example |
+|-------|---------|
+| `targetCurrency` | `Canada-Dollar` |
+| `purchaseDate` | `2024-06-15` |
+| `earliestAllowedDate` | `2023-12-15` |
+
+**String form:** `Canada-Dollar|2024-06-15|2023-12-15`
+
+#### 6.7.4 Configuration Properties
+
+| Property | Default | Maps to |
+|----------|---------|---------|
+| `treasury.cache.maximum-size` | `5000` | `.maximumSize()` |
+| `treasury.cache.expire-after-write-hours` | `1` | `.expireAfterWrite()` |
+| `treasury.cache.refresh-after-write-minutes` | `15` | `.refreshAfterWrite()` |
+
+Example `application.yml`:
+
+```yaml
+treasury:
+  cache:
+    maximum-size: 5000
+    expire-after-write-hours: 1
+    refresh-after-write-minutes: 15
+```
+
+#### 6.7.5 Read Behavior Summary
+
+| Situation | Client experience | Treasury HTTP call |
+|-----------|-------------------|-------------------|
+| First request for key | Waits for loader | Yes (with retry) |
+| Repeat within 15 min | Immediate cached response | No |
+| Repeat after 15 min, before 1 hour | Immediate cached response; refresh in background | Yes (async refresh) |
+| Repeat after 1 hour | Waits for loader (entry expired) | Yes (with retry) |
+
+#### 6.7.6 Operational Notes
+
+- **In-process only:** cache is local to the JVM; multi-instance deployments need a distributed cache (e.g. Redis) for shared state.
+- **Stats access:** `TreasuryRateCache.stats()` returns Caffeine `CacheStats`; DEBUG logging emits hit rate, load count, and eviction count.
+- **Tests:** `TreasuryExchangeRateClientCacheTest` verifies one HTTP call per distinct key; `invalidateAll()` clears cache between tests.
 
 ---
 
@@ -293,6 +466,9 @@ This implements: *“rate less than or equal to purchase date from within the la
 | Database | H2 | Runtime embedded |
 | Validation | Jakarta Bean Validation | (via Boot) |
 | HTTP Client | Spring RestClient | (via Boot) |
+| Logging | Log4j2 | Via `spring-boot-starter-log4j2` |
+| Caching | Caffeine `LoadingCache` | `caffeine` library (direct, no Spring Cache abstraction) |
+| Resilience | Spring Retry + Spring AOP | `spring-retry`, `spring-boot-starter-aop` |
 | Testing | JUnit 5, Mockito, MockMvc | (via Boot Test) |
 | Build | Maven | 3.9+ |
 
@@ -316,7 +492,9 @@ The Treasury Fiscal Data API is **public read-only**; no API key is required for
 
 | Capability | Status |
 |------------|--------|
-| Structured logging | Spring Boot defaults |
+| Application logging | **Log4j2** — console output, configurable levels per package |
+| Retry attempt logging | `RetryListenerSupport` bean logs failed attempts |
+| Cache statistics | Caffeine `recordStats()` enabled (JMX/programmatic access possible) |
 | Metrics (Micrometer) | Not configured |
 | Distributed tracing | Not configured |
 | Health endpoints | Spring Boot Actuator not added |
@@ -341,7 +519,10 @@ Developer laptop / CI
 | Level | Tests | Purpose |
 |-------|-------|---------|
 | Unit | `MoneyUtilsTest`, `CurrencyConversionServiceTest`, `PurchaseServiceTest` | Rounding, 6-month rule, service logic |
-| Integration | `PurchaseControllerIntegrationTest` | Full HTTP stack with mocked Treasury |
+| Integration | `PurchaseControllerIntegrationTest` | Full HTTP stack with mocked Treasury facade |
+| Cache | `TreasuryExchangeRateClientCacheTest` | Verifies `LoadingCache` hit/miss per key |
+
+**Total automated tests:** 13 (all passing)
 
 ### 9.2 Coverage Highlights
 
@@ -352,11 +533,13 @@ Developer laptop / CI
 - Description > 50 chars → 400
 - Unknown purchase ID → 404
 - End-to-end store + retrieve with mocked rate `1.355` → `135.50` converted
+- `LoadingCache`: second identical lookup does not call `TreasuryHttpClient` again
+- `LoadingCache`: different currency/date keys invoke separate loader calls
 
 ### 9.3 Gaps (Improvement Opportunities)
 
 - No contract test against live Treasury API (WireMock or recorded fixtures)
-- No resilience tests (timeout, 503 from Treasury)
+- No integration test simulating retry exhaustion → 503 (mocked HTTP failures)
 - No performance/load tests (explicitly out of scope per requirements)
 
 ---
@@ -371,10 +554,9 @@ Prioritized for discussion with engineering leadership.
 |-------------|---------|--------|
 | **PostgreSQL (or managed SQL) instead of H2** | Durability, multi-instance deployment | Low–Medium |
 | **Flyway/Liquibase migrations** | Repeatable schema, audit trail | Low |
-| **Resilience4j / retry on Treasury client** | Handles transient API failures | Medium |
-| **Cache exchange rates** (Caffeine + TTL) | Reduces Treasury load; faster reads | Medium |
-| **Spring Boot Actuator** (`/health`, `/metrics`) | Operational visibility | Low |
+| **Spring Boot Actuator** (`/health`, `/metrics`) | Operational visibility; expose cache stats | Low |
 | **OpenAPI (Swagger) documentation** | Easier consumer onboarding | Low |
+| **Circuit breaker** (Resilience4j) | Fail fast when Treasury is persistently down | Medium |
 
 ### 10.2 Medium Priority (API & UX)
 
@@ -404,14 +586,16 @@ Prioritized for discussion with engineering leadership.
 | **Multi-tenancy** | SaaS-style isolation | High |
 | **Kubernetes Helm chart** | Standardized deployment | Medium |
 
-### 10.5 Known Limitations (v1)
+### 10.5 Known Limitations (Current)
 
 1. **In-memory H2** — data does not survive process restart.  
-2. **Synchronous Treasury call on every GET** — latency tied to external API.  
-3. **No authentication** — acceptable for assessment; not for open production.  
-4. **Currency parameter is free-text** — typos fail at Treasury lookup, not validation.  
-5. **Single-page Treasury fetch (`page[size]=100`)** — sufficient for 6-month windows; edge cases with dense rate history may need pagination.  
-6. **No CI/CD pipeline in repo** — GitHub Actions would demonstrate delivery maturity.
+2. **Synchronous Treasury call on cache miss** — repeat lookups are fast; first lookup still blocks on HTTP.  
+3. **Cache is in-process** — not shared across multiple application instances (use Redis for clustered cache).  
+4. **No authentication** — acceptable for assessment; not for open production.  
+5. **Currency parameter is free-text** — typos fail at Treasury lookup, not validation.  
+6. **Single-page Treasury fetch (`page[size]=100`)** — sufficient for 6-month windows; edge cases with dense rate history may need pagination.  
+7. **No CI/CD pipeline in repo** — GitHub Actions would demonstrate delivery maturity.  
+8. **No circuit breaker** — retries help transient errors; sustained outages still attempt 3 calls before 503.
 
 ---
 
@@ -419,7 +603,8 @@ Prioritized for discussion with engineering leadership.
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| Treasury API unavailable | Medium | High | Retry, cache, fallback error messaging |
+| Treasury API unavailable | Medium | High | **Implemented:** retry (3×), cache, HTTP 503 with clear message |
+| Stale cached exchange rates | Low | High | **Implemented:** 1h `expireAfterWrite` hard stop; 15m `refreshAfterWrite` background reload |
 | Treasury schema/filter syntax change | Low | High | Contract tests, monitoring |
 | Incorrect rate interpretation | Low | Critical | Document rate semantics; unit tests with known examples |
 | H2 data loss on restart | High (by design) | Medium | PostgreSQL for production |
@@ -430,10 +615,11 @@ Prioritized for discussion with engineering leadership.
 ## 12. Roadmap Suggestion (Phased)
 
 ```
-Phase 1 (Current)     Assessment-ready: core requirements, tests, README
-Phase 2 (1–2 weeks)   PostgreSQL, Flyway, Actuator, GitHub Actions CI
-Phase 3 (2–4 weeks)   Caching, resilience, OpenAPI, currency alias API
-Phase 4 (Ongoing)     AuthN/Z, observability, performance baseline
+Phase 1 (Done)        Core requirements, tests, README, design docs
+Phase 2 (Done)        Log4j2, Treasury retry, LoadingCache (1h/15m/5000), 503 handling
+Phase 3 (1–2 weeks)   PostgreSQL, Flyway, Actuator, GitHub Actions CI
+Phase 4 (2–4 weeks)   Circuit breaker, OpenAPI, currency alias API, contract tests
+Phase 5 (Ongoing)     AuthN/Z, distributed cache, performance baseline
 ```
 
 ---
@@ -452,16 +638,27 @@ Phase 4 (Ongoing)     AuthN/Z, observability, performance baseline
 ```
 com.wex.purchase/
 ├── WexPurchaseApplication.java
-├── config/AppConfig.java
+├── config/
+│   ├── AppConfig.java
+│   ├── CacheRetryConfig.java
+│   └── TreasuryProperties.java
 ├── controller/PurchaseController.java
 ├── service/PurchaseService.java
 ├── service/CurrencyConversionService.java
-├── client/TreasuryExchangeRateClient.java
+├── client/
+│   ├── TreasuryExchangeRateClient.java   (facade)
+│   ├── TreasuryRateCache.java            (LoadingCache)
+│   ├── TreasuryRateCacheKey.java           (cache key)
+│   └── TreasuryHttpClient.java           (@Retryable)
 ├── repository/PurchaseTransactionRepository.java
 ├── entity/PurchaseTransaction.java
 ├── dto/*.java
 ├── exception/*.java
 └── util/MoneyUtils.java
+
+src/main/resources/
+├── application.yml
+└── log4j2-spring.xml
 ```
 
 ### C. References
@@ -472,4 +669,4 @@ com.wex.purchase/
 
 ---
 
-*This document describes the implementation as of the initial delivery. It is intended to support technical review, hiring assessment, and planning for production evolution.*
+*This document describes the implementation including Log4j2 logging, Treasury API retry, and the Caffeine `LoadingCache` policy (1h expiry, 15m refresh, 5000 entry cap). It is intended to support technical review, hiring assessment, and planning for production evolution.*

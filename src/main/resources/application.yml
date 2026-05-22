@@ -18,6 +18,14 @@ spring:
 treasury:
   api:
     base-url: https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/rates_of_exchange
+  retry:
+    max-attempts: 3
+    initial-delay-ms: 500
+    multiplier: 2.0
+  cache:
+    maximum-size: 5000
+    expire-after-write-hours: 1
+    refresh-after-write-minutes: 15
 
 server:
   port: 8080

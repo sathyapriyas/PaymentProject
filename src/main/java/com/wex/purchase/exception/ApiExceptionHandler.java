@@ -33,6 +33,16 @@ public class ApiExceptionHandler {
         return problem;
     }
 
+    @ExceptionHandler(TreasuryApiUnavailableException.class)
+    ProblemDetail handleTreasuryUnavailable(TreasuryApiUnavailableException ex) {
+        log.error("Treasury API unavailable: {}", ex.getMessage());
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.SERVICE_UNAVAILABLE, ex.getMessage());
+        problem.setTitle("Treasury API Unavailable");
+        problem.setType(URI.create("about:blank#treasury-api-unavailable"));
+        return problem;
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
         String detail = ex.getBindingResult().getFieldErrors().stream()
